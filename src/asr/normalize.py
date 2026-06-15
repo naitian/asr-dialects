@@ -13,13 +13,28 @@ corpus*:
       system output. This accounts for variance in how a system transcribes a
       given utterance.
 
-Everything else -- the shared English lexicon and the numeric/spelling/symbol
-cleanup tail -- applies to both gold and system. So the *only* difference
-between normalizing gold and system text is whether markup is stripped, which
+Everything else -- cardinal-direction expansion, the shared English lexicon,
+filler/expletive removal, and the numeric/spelling/symbol cleanup tail --
+applies to both gold and system. So the *only* difference between normalizing
+gold and system text is whether markup is stripped, which
 ``build(profile, strip_markup=...)`` exposes as a single flag.
 
 We use the whisper normalization as a base, adapted to the SCOSYA and CORAAL
-transcription schemes.
+transcription schemes, and cross-checked against the cleaning rules from
+Koenecke et al. (2020) "Racial disparities in automated speech recognition"
+(stanford-policylab/asr-disparities). Where Koenecke and whisper overlap we let
+whisper handle it (Arabic numerals, British->American spellings, symbol/punct
+stripping); the Koenecke-specific rules reproduced here are filler/expletive
+removal, cardinal-direction expansion, the spelling standardizations, and (for
+CORAAL only) US state-name abbreviation.
+
+NOTE: Two deliberate deviations from Koenecke. (1) Contractions are *expanded*
+("won't" -> "will not") rather than having their apostrophes deleted; the rule
+intent (normalize contractions consistently across both sides) is preserved.
+(2) Koenecke's IBM/Google-era cleanups ("%HESITATION", "T V" -> "TV",
+"ft squared" -> "square feet") are dropped as they do not occur in whisper
+output. Number/year/area-code spelling is delegated to the whisper number
+normalizer rather than Koenecke's ``fix_numbers``.
 
 NOTE: This might overfit to whisper, so we may want to re-check it when adding a
 new system.
@@ -75,6 +90,29 @@ def replace_lexicon(mapping: dict[str, str]) -> Step:
 def apply_callable(fn: Callable[[str], str]) -> Step:
     """Wrap a stateful callable (e.g. a whisper normalizer) as a step."""
     return lambda text: fn(text)
+
+
+# --------------------------------------------------------------------------- #
+# Cardinal directions (Koenecke): abbreviations -> full words, e.g.
+# "NW" -> "Northwest". Run *before* lowercasing and case-sensitively, since the
+# single-letter forms ("N", "E", "S", "W") are only unambiguous as uppercase
+# standalone tokens. Applied to both gold and system.
+# --------------------------------------------------------------------------- #
+CARDINALS: dict[str, str] = {
+    "N": "North",
+    "E": "East",
+    "S": "South",
+    "W": "West",
+    "NE": "Northeast",
+    "NW": "Northwest",
+    "SE": "Southeast",
+    "SW": "Southwest",
+}
+_CARDINAL_RE = re.compile(r"\b(" + "|".join(CARDINALS) + r")\b")
+
+
+def standardize_cardinals(text: str) -> str:
+    return _CARDINAL_RE.sub(lambda m: CARDINALS[m.group()], text)
 
 
 # --------------------------------------------------------------------------- #
@@ -150,6 +188,22 @@ SHARED_LEXICON: dict[str, str] = {
     r"\bwhatchu\b": "what are you",  # could also be "what do you"
     r"\bwhatcha\b": "what are you",
     r"\bgotcha\b": "got you",
+    # spelling standardizations (Koenecke et al.). Their canonical token differs
+    # in a few cases (e.g. they pick "cause"/"mr"/"til"); we fold each variant
+    # into the canonical form *this* file already uses, which is WER-neutral as
+    # long as both sides match. "cuz"/"till" therefore land on "because"/"until"
+    # (cf. the `\bcause\b`/`\btil\b` rules above), not Koenecke's tokens.
+    r"\bcuz\b": "because",
+    r"\bok\b": "okay",
+    r"\bo\b(?!')": "oh",  # lookahead leaves "o'clock" untouched
+    r"\btill\b": "until",
+    r"\byup\b": "yep",
+    # spacing standardizations (Koenecke): joined cardinal/quantifier spellings.
+    r"\bnorth east\b": "northeast",
+    r"\bnorth west\b": "northwest",
+    r"\bsouth east\b": "southeast",
+    r"\bsouth west\b": "southwest",
+    r"\ball right\b": "alright",
 }
 
 
@@ -158,7 +212,18 @@ SHARED_LEXICON: dict[str, str] = {
 # Applied to gold *and* system. Built lazily so importing this module doesn't
 # construct the whisper normalizers until a pipeline is actually built.
 # --------------------------------------------------------------------------- #
-IGNORE_FILLERS = r"\b(hmm|mm|mhm|mmm|uh|um|ah)\b"  # "ah" added from CORAAL
+# Filled pauses: whisper/CORAAL set ("ah", "hmm", "mmm") plus Koenecke's
+# ("hm", "ooh", "woo", "huh", "ha"). Removed from gold and system.
+IGNORE_FILLERS = r"\b(hmm|mm|mhm|mmm|hm|uh|um|ah|ooh|woo|huh|ha)\b"
+
+# Expletives (Koenecke): ASR systems censor/spell profanity inconsistently, so
+# we drop it from both sides rather than score it. Runs *after* the lexicon, so
+# dialect spellings normalized to a standard expletive (e.g. CORAAL "bih" ->
+# "bitch") are caught too.
+IGNORE_EXPLETIVES = (
+    r"\b(nigga|niggas|shit|bitch|damn|fuck|fuckin|fucking"
+    r"|motherfuckin|motherfucking)\b"
+)
 
 
 def numeric_tail() -> list[Step]:
@@ -198,6 +263,68 @@ def strip_parens_and_slashes() -> list[Step]:
     ]
 
 
+# US state names -> two-letter abbreviations (Koenecke). CORAAL-only: this is a
+# US-English corpus, whereas applying US state abbreviations to Scottish SCOSYA
+# would be meaningless. Patterns are lowercase (the lexicon runs after
+# str.lower) and multi-word states come first so e.g. "west virginia" wins over
+# "virginia". NOTE: after the trailing lowercasing several abbreviations collide
+# with common words (Ohio/Oklahoma/Oregon/Indiana/Maine -> "oh"/"ok"/"or"/"in"/
+# "me"); this is a known Koenecke quirk, kept for faithfulness and harmless to
+# WER as long as gold and system are folded identically.
+STATE_ABBREVS: dict[str, str] = {
+    r"\bnew hampshire\b": "nh",
+    r"\bnew jersey\b": "nj",
+    r"\bnew mexico\b": "nm",
+    r"\bnew york\b": "ny",
+    r"\bnorth carolina\b": "nc",
+    r"\bnorth dakota\b": "nd",
+    r"\brhode island\b": "ri",
+    r"\bsouth carolina\b": "sc",
+    r"\bsouth dakota\b": "sd",
+    r"\bwest virginia\b": "wv",
+    r"\balabama\b": "al",
+    r"\balaska\b": "ak",
+    r"\barizona\b": "az",
+    r"\barkansas\b": "ar",
+    r"\bcalifornia\b": "ca",
+    r"\bcolorado\b": "co",
+    r"\bconnecticut\b": "ct",
+    r"\bdelaware\b": "de",
+    r"\bflorida\b": "fl",
+    r"\bgeorgia\b": "ga",
+    r"\bhawaii\b": "hi",
+    r"\bidaho\b": "id",
+    r"\billinois\b": "il",
+    r"\bindiana\b": "in",
+    r"\biowa\b": "ia",
+    r"\bkansas\b": "ks",
+    r"\bkentucky\b": "ky",
+    r"\blouisiana\b": "la",
+    r"\bmaine\b": "me",
+    r"\bmaryland\b": "md",
+    r"\bmassachusetts\b": "ma",
+    r"\bmichigan\b": "mi",
+    r"\bminnesota\b": "mn",
+    r"\bmississippi\b": "ms",
+    r"\bmissouri\b": "mo",
+    r"\bmontana\b": "mt",
+    r"\bnebraska\b": "ne",
+    r"\bnevada\b": "nv",
+    r"\bohio\b": "oh",
+    r"\boklahoma\b": "ok",
+    r"\boregon\b": "or",
+    r"\bpennsylvania\b": "pa",
+    r"\btennessee\b": "tn",
+    r"\btexas\b": "tx",
+    r"\butah\b": "ut",
+    r"\bvermont\b": "vt",
+    r"\bvirginia\b": "va",
+    r"\bwashington\b": "wa",
+    r"\bwisconsin\b": "wi",
+    r"\bwyoming\b": "wy",
+}
+
+
 CORAAL = NormProfile(
     name="coraal",
     markup_steps=[
@@ -211,10 +338,15 @@ CORAAL = NormProfile(
         # NOTE: Koenecke et al. normalize some of these (e.g. "aks").
         r"\baight\b": "alright",
         r"\baks\b": "ask",
+        r"\baksing\b": "asking",
+        r"\baksed\b": "asked",
+        r"\bbusses\b": "buses",
         r"\b'bacca\b": "tobacco",
         r"\bbih\b": "bitch",
         r"\bbruh\b": "bro",
         r"\bfella\b": "fellow",
+        # US state names -> abbreviations (CORAAL is US English); see above.
+        **STATE_ABBREVS,
     },
 )
 
@@ -267,7 +399,9 @@ def build(profile: NormProfile, *, strip_markup: bool) -> Normalizer:
     corpus's annotation syntax) and ``strip_markup=False`` for system output.
     The corpus lexicon is applied either way.
     """
-    steps: list[Step] = [str.lower]
+    # cardinal directions are expanded before lowercasing (the single-letter
+    # forms are only safe to match as uppercase standalone tokens).
+    steps: list[Step] = [standardize_cardinals, str.lower]
     if strip_markup:
         steps += profile.markup_steps
     steps += [
@@ -276,6 +410,9 @@ def build(profile: NormProfile, *, strip_markup: bool) -> Normalizer:
         # corpus lexicon layered on top of the shared lexicon (shared first);
         # applied to both gold and system to absorb transcription variance.
         replace_lexicon(SHARED_LEXICON | profile.lexicon),
+        # expletives are removed *after* the lexicon so dialect spellings that
+        # normalize to a standard expletive are caught too.
+        regex_sub(IGNORE_EXPLETIVES),
         *numeric_tail(),
     ]
     return Normalizer(steps)

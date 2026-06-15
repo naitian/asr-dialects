@@ -9,15 +9,34 @@ independently editable unit:
 | `asr/normalize.py` | Normalization pipeline. `SHARED_LEXICON` + numeric tail apply to all; each corpus is a `NormProfile` (markup steps = gold-only, lexicon = both sides). `build(profile, strip_markup=...)`; `PROFILES` registry. |
 | `asr/corpora.py`   | `Corpus` ABC holding all chunking/audio logic; `CORAALCorpus`/`SCOSYACorpus` override only discovery + transcript parsing; `CORPORA` registry. |
 | `asr/models.py`    | `Model` protocol (`transcribe(path)->str`), `WhisperModel`, `MODELS` registry (factories keyed by name). |
-| `asr/dataset.py`   | `load(corpora, models)` -> tidy long-format DataFrame (one row per utterance x model) with `gold_norm`/`system_norm` applied per corpus. The analysis entry point. |
+| `asr/dataset.py`   | `load(corpora, models)` -> tidy long-format DataFrame (one row per utterance x model) with `gold_norm`/`system_norm` applied per corpus, plus the cached per-utterance `wer` when `data/wer/{corpus}__{model}.tsv` exists. Normalization (the slow step) is cached to `data/norm/` and self-invalidates per row via fingerprints; see "Caching" below. The analysis entry point. |
 | `asr/transcribe.py`| CLI: run a model over a corpus's chunks (data parallel), output `data/transcriptions/{corpus}__{model}.tsv`. |
-| `asr/evaluate.py`  | CLI: exact-match + WER per (corpus, model) via `dataset.load`. |
+| `asr/evaluate.py`  | CLI: exact-match + WER per (corpus, model) via `dataset.load`; also writes per-utterance WER to `data/wer/{corpus}__{model}.tsv` (read back by `load`). |
 
 Adding a corpus = subclass `Corpus` + a `NormProfile` + registry entries.
 Adding a model = implement `transcribe()` + a `MODELS` entry.
 
 Normalization is applied **at load time**, not baked into stored files, so the
 raw text stays canonical and revising rules just means reloading.
+
+### Caching
+
+Normalization runs the whisper normalizers per string and is the slow part of a
+load, so `load` caches it under `data/norm/` (`{corpus}__gold.tsv`,
+`{corpus}__{model}__system.tsv`) and `asr.evaluate` caches per-utterance WER
+under `data/wer/`. Both are **self-invalidating per row** — no manual busting:
+
+- **norm cache**: each row stores `fingerprint = hash(rule_signature + input)`,
+  where `rule_signature = hash(asr/normalize.py source + whisper version)`. A row
+  is reused only on an exact fingerprint match, so editing `normalize.py` or a
+  transcript recomputes exactly the affected rows. Pass `use_cache=False` to skip.
+- **WER cache**: WER is a pure function of `(gold_norm, system_norm)`, so each row
+  stores `fingerprint = hash(gold_norm + system_norm)`; `load` recomputes the
+  (now cached, cheap) normalizations and drops any WER row whose fingerprint no
+  longer matches. No rule signature needed — WER survives rule edits that don't
+  change the normalized text.
+
+Caches are plain TSVs and safe to delete; they rebuild on the next load.
 
 ```sh
 python -m asr.corpora                                   # build chunks
