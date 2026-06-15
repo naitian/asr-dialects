@@ -1,3 +1,38 @@
+## Code layout
+
+Each axis of variation (corpus, model, normalization rule) is a first-class,
+independently editable unit:
+
+| module             | responsibility |
+|--------------------|----------------|
+| `asr/chunk.py`     | `Chunk` / `TranscribedChunk` dataclasses (the on-disk/in-frame schema, incl. `corpus`, `speaker`, `line_no`, `extra`). |
+| `asr/normalize.py` | Normalization pipeline. `SHARED_LEXICON` + numeric tail apply to all; each corpus is a `NormProfile` (markup steps = gold-only, lexicon = both sides). `build(profile, strip_markup=...)`; `PROFILES` registry. |
+| `asr/corpora.py`   | `Corpus` ABC holding all chunking/audio logic; `CORAALCorpus`/`SCOSYACorpus` override only discovery + transcript parsing; `CORPORA` registry. |
+| `asr/models.py`    | `Model` protocol (`transcribe(path)->str`), `WhisperModel`, `MODELS` registry (factories keyed by name). |
+| `asr/dataset.py`   | `load(corpora, models)` -> tidy long-format DataFrame (one row per utterance x model) with `gold_norm`/`system_norm` applied per corpus. The analysis entry point. |
+| `asr/transcribe.py`| CLI: run a model over a corpus's chunks (data parallel), output `data/transcriptions/{corpus}__{model}.tsv`. |
+| `asr/evaluate.py`  | CLI: exact-match + WER per (corpus, model) via `dataset.load`. |
+
+Adding a corpus = subclass `Corpus` + a `NormProfile` + registry entries.
+Adding a model = implement `transcribe()` + a `MODELS` entry.
+
+Normalization is applied **at load time**, not baked into stored files, so the
+raw text stays canonical and revising rules just means reloading.
+
+```sh
+python -m asr.corpora                                   # build chunks
+python -m asr.transcribe coraal --model whisper-large --num-processes 4
+python -m asr.evaluate coraal scosya --model whisper-large
+```
+
+SCOSYA `.trs` text lives in the tails after `<Sync>`/`<Who>` markers, not in
+`Turn.text`; `parse_transcript` collects it via `itertext()`. To refresh just
+the chunk metadata after a parser change (no audio re-extraction), use
+`Corpus.build_index()`; `create_chunks()` (re)extracts audio clips and skips
+ones that already exist.
+
+---
+
 ASR evaluation steps:
 
 1. Standardize gold transcripts. We consult the SCOSYA and CORAAL corpora

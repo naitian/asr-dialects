@@ -1,124 +1,136 @@
 """
-Use model to transcribe a corpus (data parallel)
+Transcribe a corpus's chunks with a model (data parallel across GPUs).
+
+Reads the per-utterance clips under ``data/chunks/{corpus}/`` and writes one
+system's output to ``data/transcriptions/{corpus}__{model}.tsv`` (plus per-clip
+``.txt`` files under ``data/transcriptions/{corpus}/{model}/``).
+
+    python -m asr.transcribe coraal --model whisper-large --num-processes 4
+
+Keying outputs by both corpus and model lets several systems coexist for
+evaluation; see ``asr.dataset.load`` to read them back.
 """
 
 import argparse
 import csv
 import subprocess
+import sys
 from pathlib import Path
 
-import whisper
 from tqdm.auto import tqdm
 
+from asr.models import MODELS, build_model
 from asr.utils import DATA_DIR
 
 
-def process_subset(subset, rank, model_name="large", overwrite_existing=False):
-    """Process the subset."""
-    model = whisper.load_model(model_name, device=f"cuda:{rank % 4}")
+def chunks_dir(corpus: str) -> Path:
+    return DATA_DIR / "chunks" / corpus
 
-    input_dir = subset[0].parent
-    output_dir = DATA_DIR / "transcriptions" / input_dir.name
-    print(output_dir)
 
-    for audio_file in tqdm(subset, desc=f"Process rank {rank}"):
-        result = model.transcribe(str(audio_file))
-        output_file = output_dir / f"{audio_file.stem}.txt"
+def output_dir(corpus: str, model: str) -> Path:
+    return DATA_DIR / "transcriptions" / corpus / model
+
+
+def compiled_path(corpus: str, model: str) -> Path:
+    return DATA_DIR / "transcriptions" / f"{corpus}__{model}.tsv"
+
+
+def process_subset(
+    clips: list[Path],
+    corpus: str,
+    model_name: str,
+    rank: int,
+    overwrite_existing: bool = False,
+) -> None:
+    model = build_model(model_name, device=f"cuda:{rank % 4}")
+    out_dir = output_dir(corpus, model_name)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    for clip in tqdm(clips, desc=f"{model_name} rank {rank}"):
+        output_file = out_dir / f"{clip.stem}.txt"
         if output_file.exists() and not overwrite_existing:
             continue
-
-        output_file.parent.mkdir(parents=True, exist_ok=True)
-        with open(output_file, "w") as f:
-            f.write(str(result["text"]) + "\n")
+        text = model.transcribe(clip)
+        output_file.write_text(text + "\n")
 
 
-def compile_files(inputs):
-    input_dir = inputs[0].parent
-    output_dir = DATA_DIR / "transcriptions" / input_dir.name
-    output_file = DATA_DIR / "transcriptions" / f"{input_dir.name}.tsv"
-
-    writer = csv.DictWriter(
-        output_file.open("w"),
-        fieldnames=["utterance_id", "system_text", "transcription_path"],
-        delimiter="\t",
-    )
-    writer.writeheader()
-    for file in tqdm(list(output_dir.glob("*.txt"))):
-        writer.writerow(
-            {
-                "utterance_id": file.stem,
-                "system_text": file.open("r").read(),
-                "transcription_path": str(file),
-            }
+def compile_outputs(corpus: str, model_name: str) -> None:
+    out_dir = output_dir(corpus, model_name)
+    with compiled_path(corpus, model_name).open("w") as handle:
+        writer = csv.DictWriter(
+            handle,
+            fieldnames=["utterance_id", "system_text", "system", "transcription_path"],
+            delimiter="\t",
         )
+        writer.writeheader()
+        for file in tqdm(sorted(out_dir.glob("*.txt")), desc="Compiling"):
+            writer.writerow(
+                {
+                    "utterance_id": file.stem,
+                    "system_text": file.read_text().strip(),
+                    "system": model_name,
+                    "transcription_path": str(file),
+                }
+            )
 
 
-def parse_args():
-    parser = argparse.ArgumentParser(
-        description="Transcribe a corpus using a model with data parallel processing."
-    )
-    parser.add_argument("input_dir", type=str)
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("corpus", help="corpus name (chunks live in data/chunks/<corpus>)")
     parser.add_argument(
-        "--rank",
-        type=int,
-        default=0,
-        help="Rank of the process (for distributed processing).",
+        "--model", default="whisper-large", choices=list(MODELS), help="model to run"
     )
+    parser.add_argument("--rank", type=int, default=0, help="this process's rank")
     parser.add_argument(
-        "--num-processes",
-        type=int,
-        default=1,
-        help="Total number of processes for distributed processing.",
+        "--num-processes", type=int, default=1, help="number of data-parallel processes"
     )
     parser.add_argument(
         "--only-compile",
         action="store_true",
-        help="Only compile the transcribed TXTs into a single file; do not run the transcription.",
+        help="only compile per-clip TXTs into the TSV; do not transcribe.",
     )
+    parser.add_argument("--overwrite", action="store_true")
     return parser.parse_args()
 
 
-if __name__ == "__main__":
+def main() -> None:
     args = parse_args()
+    clips = sorted(chunks_dir(args.corpus).glob("*.wav"))
 
-    input_dir = Path(args.input_dir)
-    # Get all .wav files in the input directory
-    inputs = list(input_dir.glob("*.wav"))
-    rank = args.rank
-    num_processes = args.num_processes
-    # start processes with other ranks
     subprocesses = []
-    if rank == 0:
-        print(f"Found {len(inputs)} .wav files in {input_dir}")
-
-        for i in range(1, num_processes):
-            proc = subprocess.Popen(
-                [
-                    "python",
-                    __file__,
-                    "--rank",
-                    str(i),
-                    "--num-processes",
-                    str(num_processes),
-                    "--only-compile" if args.only_compile else "",
-                    str(input_dir),
-                ]
-            )
-            subprocesses.append(proc)
+    if args.rank == 0:
+        print(f"Found {len(clips)} clips for {args.corpus} -> {args.model}")
+        for rank in range(1, args.num_processes):
+            cmd = [
+                sys.executable, "-m", "asr.transcribe", args.corpus,
+                "--model", args.model,
+                "--rank", str(rank),
+                "--num-processes", str(args.num_processes),
+            ]
+            if args.only_compile:
+                cmd.append("--only-compile")
+            if args.overwrite:
+                cmd.append("--overwrite")
+            subprocesses.append(subprocess.Popen(cmd))
 
     if not args.only_compile:
-        # process texts for the current rank
-        process_subset(inputs[rank::num_processes], rank=rank)
+        process_subset(
+            clips[args.rank :: args.num_processes],
+            corpus=args.corpus,
+            model_name=args.model,
+            rank=args.rank,
+            overwrite_existing=args.overwrite,
+        )
 
-    # wait for all subprocesses to finish
-    if rank == 0:
+    if args.rank == 0:
         for proc in subprocesses:
             proc.wait()
-        print("All subprocesses finished.")
         print("Compiling into single file.")
-        compile_files(inputs)
-        print("Finished compiling into single file.")
-
+        compile_outputs(args.corpus, args.model)
+        print(f"Wrote {compiled_path(args.corpus, args.model)}")
     else:
-        print(f"Process {rank} finished transcribing texts.")
-    pass
+        print(f"Process {args.rank} finished transcribing.")
+
+
+if __name__ == "__main__":
+    main()
