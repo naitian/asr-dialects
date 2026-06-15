@@ -1,0 +1,30 @@
+[project]
+authors = [{name = "Naitian Zhou", email = "naitian@berkeley.edu"}]
+dependencies = [
+    "ipdb>=0.13.13",
+    "openai-whisper>=20250625,<20250626",
+    "torch>=2.12.0",
+    "torchaudio>=2.11.0",
+    "torchcodec>=0.13.0",
+    "tqdm>=4.67.3", "pandas>=3.0.3,<4", "trsproc>=2.1.0,<3",
+]
+name = "asr"
+requires-python = ">= 3.11"
+version = "0.1.0"
+
+[build-system]
+build-backend = "hatchling.build"
+requires = ["hatchling"]
+
+
+[tool.pixi.workspace]
+channels = ["conda-forge"]
+platforms = ["linux-64"]
+
+[tool.pixi.pypi-dependencies]
+asr = { path = ".", editable = true }
+
+[tool.pixi.tasks]
+
+[tool.pixi.dependencies]
+ffmpeg = ">=8.1.1,<9"
