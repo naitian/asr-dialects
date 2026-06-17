@@ -368,6 +368,8 @@ SCOSYA = NormProfile(
         # can be searched at once.
         r"\bnt\b": "not",
         r"\bna\b": "not",
+        # scosya transcribes mhm as mmhm
+        r"\bmmhm\b": "mhm",
         # "occasionally 'gaa' has been heard for 'gonna'":
         r"\bgaa\b": "gonna",
         # NOTE: we normalize "nae" -> "not" for now (not fully principled; we
