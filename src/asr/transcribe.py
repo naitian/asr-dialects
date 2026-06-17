@@ -40,9 +40,10 @@ def process_subset(
     corpus: str,
     model_name: str,
     rank: int,
+    world_size: int,
     overwrite_existing: bool = False,
 ) -> None:
-    model = build_model(model_name, device=f"cuda:{rank % 4}")
+    model = build_model(model_name, device=f"cuda:{rank % world_size}")
     out_dir = output_dir(corpus, model_name)
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -76,7 +77,9 @@ def compile_outputs(corpus: str, model_name: str) -> None:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("corpus", help="corpus name (chunks live in data/chunks/<corpus>)")
+    parser.add_argument(
+        "corpus", help="corpus name (chunks live in data/chunks/<corpus>)"
+    )
     parser.add_argument(
         "--model", default="whisper-large", choices=list(MODELS), help="model to run"
     )
@@ -102,10 +105,16 @@ def main() -> None:
         print(f"Found {len(clips)} clips for {args.corpus} -> {args.model}")
         for rank in range(1, args.num_processes):
             cmd = [
-                sys.executable, "-m", "asr.transcribe", args.corpus,
-                "--model", args.model,
-                "--rank", str(rank),
-                "--num-processes", str(args.num_processes),
+                sys.executable,
+                "-m",
+                "asr.transcribe",
+                args.corpus,
+                "--model",
+                args.model,
+                "--rank",
+                str(rank),
+                "--num-processes",
+                str(args.num_processes),
             ]
             if args.only_compile:
                 cmd.append("--only-compile")
@@ -119,6 +128,7 @@ def main() -> None:
             corpus=args.corpus,
             model_name=args.model,
             rank=args.rank,
+            world_size=args.num_processes,
             overwrite_existing=args.overwrite,
         )
 
