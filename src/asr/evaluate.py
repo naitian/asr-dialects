@@ -17,7 +17,7 @@ import pandas as pd
 import typer
 from Levenshtein import distance
 
-from asr.dataset import load, wer_fingerprint, wer_path
+from asr.dataset import load, save_wer
 
 app = typer.Typer()
 
@@ -52,17 +52,16 @@ def diagnostic(
 
         print(f"Evaluating {model_name} outputs for {corpus}")
         exact_match = (gold == system).mean()
-        # fingerprint each (gold, system) pair so load() can drop stale WER rows
-        # without re-scoring; aligned to the group's index.
-        fingerprints = wer_fingerprint(gold, system)
+
+        # score only non-empty gold utterances (WER is undefined otherwise)
+        keep = gold.str.strip() != ""
+        ids = group["utterance_id"][keep].astype(str)
+        refs = gold[keep]
+        hyps = system[keep]
+
         records = []
         errors = lengths = 0
-        for utterance_id, ref, hyp, fingerprint in zip(
-            group["utterance_id"], gold, system, fingerprints
-        ):
-            # skip empty gold utterances (WER is undefined for them)
-            if len(ref.strip()) == 0:
-                continue
+        for utterance_id, ref, hyp in zip(ids, refs, hyps):
             dist, ref_len = word_error_rate(ref, hyp)
             errors += dist
             lengths += ref_len
@@ -72,7 +71,6 @@ def diagnostic(
                     "edit_distance": dist,
                     "ref_length": ref_len,
                     "wer": dist / ref_len if ref_len else float("nan"),
-                    "fingerprint": fingerprint,
                 }
             )
         wer = errors / lengths if lengths else float("nan")
@@ -83,9 +81,15 @@ def diagnostic(
         )
 
         if save and records:
-            out_path = wer_path(corpus, model_name)
-            out_path.parent.mkdir(parents=True, exist_ok=True)
-            pd.DataFrame(records).to_csv(out_path, sep="\t", index=False)
+            # fingerprint covers the scored utterances' (gold, system) pairs so
+            # load() can validate the whole file before reusing it.
+            out_path = save_wer(
+                corpus,
+                model_name,
+                pd.DataFrame(records),
+                gold_norm=refs,
+                system_norm=hyps,
+            )
             print(f"Wrote {out_path}")
 
 

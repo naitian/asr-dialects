@@ -12,15 +12,16 @@ disk), so revising normalization rules just means reloading.
 Layout on disk:
     data/chunks/{corpus}_chunks.tsv               -- gold side (see asr.corpora)
     data/transcriptions/{corpus}__{model}.tsv     -- one file per system
-    data/norm/{corpus}__gold.tsv                  -- cached gold_norm
-    data/norm/{corpus}__{model}__system.tsv       -- cached system_norm
-    data/wer/{corpus}__{model}.tsv                -- per-utterance WER (optional)
+    data/norm/{corpus}__gold.tsv (+ .fp)          -- cached gold_norm
+    data/norm/{corpus}__{model}__system.tsv (+ .fp)  -- cached system_norm
+    data/wer/{corpus}__{model}.tsv (+ .fp)        -- per-utterance WER (optional)
 
 Caches under ``data/norm`` and ``data/wer`` are written here / by ``asr.evaluate``
-and reused on later loads; absence is never an error. Both self-invalidate per
-row via a fingerprint (see ``normalizer_signature`` / ``wer_fingerprint``), so a
-rule change in ``asr.normalize`` or an edited transcript recomputes only the
-affected rows -- no manual cache busting needed.
+and reused on later loads; absence is never an error. Each is a whole-corpus
+(corpus x model) file, so invalidation is at the *file* level: a sidecar
+``.fp`` holds one fingerprint over all rows (see ``normalizer_signature`` /
+``wer_fingerprint``), and a rule change in ``asr.normalize`` or any edited
+transcript simply rebuilds the file -- no manual cache busting needed.
 """
 
 import hashlib
@@ -46,6 +47,8 @@ COLUMNS = [
     "model",
     "system_text",
     "system_norm",
+    "edit_distance",
+    "ref_length",
     "wer",
     "audio_path",
     "utterance_path",
@@ -73,20 +76,48 @@ def norm_cache_path(corpus: str, key: str) -> Path:
 
 # --------------------------------------------------------------------------- #
 # Cache fingerprints (invalidation)
+#
+# Every cache is a whole corpus-level (corpus x model) file, so we fingerprint
+# at the *file* level rather than per row: one hash over all rows decides whether
+# the file is reusable. The fingerprint lives in a sidecar ``<cache>.fp`` next to
+# the ``.tsv``. It is order-independent (rows are sorted by ``utterance_id``
+# before hashing) so it survives incidental reordering.
 # --------------------------------------------------------------------------- #
 def _sha1(text: str) -> str:
     return hashlib.sha1(text.encode("utf-8")).hexdigest()
 
 
+def _file_fingerprint(prefix: str, ids: pd.Series, *values: pd.Series) -> str:
+    """Order-independent hash of ``(utterance_id, *values)`` rows, salted by ``prefix``."""
+    frame = pd.DataFrame({"id": ids.astype(str).to_numpy()})
+    for index, column in enumerate(values):
+        frame[index] = column.fillna("").astype(str).to_numpy()
+    frame = frame.sort_values("id", kind="stable")
+    hasher = hashlib.sha1()
+    hasher.update(prefix.encode("utf-8"))
+    for column in frame.columns:
+        hasher.update(b"\x01")
+        hasher.update("\x00".join(frame[column]).encode("utf-8"))
+    return hasher.hexdigest()
+
+
+def _fingerprint_path(cache_path: Path) -> Path:
+    return cache_path.with_suffix(".fp")
+
+
+def _read_fingerprint(cache_path: Path) -> str | None:
+    path = _fingerprint_path(cache_path)
+    return path.read_text().strip() if path.exists() else None
+
+
 def normalizer_signature() -> str:
-    """Fingerprint of the normalization *rules*, for the norm cache.
+    """Fingerprint of the normalization *rules*, salted into the norm cache.
 
     A cached normalization can't be checked without re-running the (slow)
-    normalizer, so we instead fingerprint each row as ``hash(signature + input)``
-    where the signature covers everything that determines the rules: the source
-    of ``asr.normalize`` plus the whisper version (the whisper normalizers carry
-    their own lexicons). Any edit there changes the signature and forces a
-    recompute on the next load.
+    normalizer, so the file fingerprint folds in everything that determines the
+    rules: the source of ``asr.normalize`` plus the whisper version (the whisper
+    normalizers carry their own lexicons). Any edit there changes the signature
+    and forces a full recompute on the next load.
     """
     import whisper
 
@@ -95,17 +126,17 @@ def normalizer_signature() -> str:
     return _sha1(source.decode("utf-8", "replace") + "\x00" + version)
 
 
-def wer_fingerprint(gold_norm: pd.Series, system_norm: pd.Series) -> pd.Series:
-    """Per-row fingerprint of the normalized (gold, system) pair, for the WER cache.
+def wer_fingerprint(
+    utterance_id: pd.Series, gold_norm: pd.Series, system_norm: pd.Series
+) -> str:
+    """File-level fingerprint of a WER cache: one hash over its ``(id, gold, system)``.
 
-    WER is a pure function of these two strings, so a cached WER stays valid iff
-    they are unchanged -- independent of *which* rules produced them. This is why
-    the WER fingerprint needs no rule signature: ``load`` recomputes the (now
-    cached, cheap) normalizations and compares.
+    WER is a pure function of the normalized pair, so the cache stays valid iff
+    every cached utterance's ``(gold_norm, system_norm)`` is unchanged --
+    independent of *which* rules produced them, hence no rule signature here.
+    ``load`` recomputes this over the same utterance set and compares.
     """
-    gold = gold_norm.fillna("").astype(str)
-    system = system_norm.fillna("").astype(str)
-    return (gold + "\x00" + system).map(_sha1)
+    return _file_fingerprint("", utterance_id, gold_norm, system_norm)
 
 
 def load_chunks(corpus: str) -> pd.DataFrame:
@@ -150,6 +181,29 @@ def load_wer(corpus: str, model: str) -> pd.DataFrame | None:
     return pd.read_csv(path, sep="\t")
 
 
+def save_wer(
+    corpus: str,
+    model: str,
+    records: pd.DataFrame,
+    *,
+    gold_norm: pd.Series,
+    system_norm: pd.Series,
+) -> Path:
+    """Write the per-utterance WER cache plus its fingerprint sidecar.
+
+    ``records`` holds the scored rows (``utterance_id, edit_distance, ref_length,
+    wer``); ``gold_norm``/``system_norm`` are the normalized columns those scores
+    came from, positionally aligned with ``records``. The file fingerprint is
+    taken over that same utterance set so ``load`` can validate it.
+    """
+    path = wer_path(corpus, model)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    records.to_csv(path, sep="\t", index=False)
+    fingerprint = wer_fingerprint(records["utterance_id"], gold_norm, system_norm)
+    _fingerprint_path(path).write_text(fingerprint)
+    return path
+
+
 def cached_normalize(
     df: pd.DataFrame,
     *,
@@ -159,61 +213,56 @@ def cached_normalize(
     signature: str,
     use_cache: bool = True,
 ) -> pd.Series:
-    """Normalize ``df[text_col]``, reusing ``cache_path`` for unchanged rows.
+    """Normalize ``df[text_col]``, reusing the whole ``cache_path`` when it's current.
 
-    A row is reused iff ``hash(signature + input_text)`` matches the cached
-    fingerprint; otherwise the normalizer is (re)run for that row only. The
-    refreshed cache (covering exactly the rows just seen) is written back, so
-    stale/removed utterances drop out on their own. Returns a Series aligned to
-    ``df.index``.
+    The cache is validated at the file level: if its sidecar fingerprint matches
+    ``hash(signature + all inputs)``, the stored norms are mapped straight back by
+    ``utterance_id``; otherwise the normalizer is re-run over every row and the
+    cache (plus fingerprint) is rewritten. Returns a Series aligned to ``df.index``.
     """
-    inputs = df[text_col].fillna("").astype(str)
     ids = df["utterance_id"].astype(str)
-    fingerprints = (signature + "\x00" + inputs).map(_sha1)
+    inputs = df[text_col].fillna("").astype(str)
+    fingerprint = _file_fingerprint(signature, ids, inputs)
 
-    cached: dict[str, tuple[str, str]] = {}
-    if use_cache and cache_path.exists():
-        prev = pd.read_csv(cache_path, sep="\t", dtype=str, keep_default_na=False)
-        cached = {
-            uid: (fp, norm)
-            for uid, fp, norm in zip(prev["utterance_id"], prev["fingerprint"], prev["norm"])
-        }
+    if use_cache and cache_path.exists() and _read_fingerprint(cache_path) == fingerprint:
+        cached = pd.read_csv(cache_path, sep="\t", dtype=str, keep_default_na=False)
+        norm_by_id = dict(zip(cached["utterance_id"], cached["norm"]))
+        print(f"  {cache_path.name}: cache hit ({len(df)} rows)")
+        return ids.map(norm_by_id)
 
-    values: list[str] = []
-    hits = 0
-    for uid, text, fingerprint in zip(ids, inputs, fingerprints):
-        entry = cached.get(uid)
-        if entry is not None and entry[0] == fingerprint:
-            values.append(entry[1])
-            hits += 1
-        else:
-            values.append(normalizer(text))
-
+    values = [normalizer(text) for text in inputs]
     if use_cache:
         cache_path.parent.mkdir(parents=True, exist_ok=True)
-        pd.DataFrame(
-            {"utterance_id": ids.values, "fingerprint": fingerprints.values, "norm": values}
-        ).to_csv(cache_path, sep="\t", index=False)
-
-    print(f"  {cache_path.name}: {hits}/{len(values)} cached, {len(values) - hits} recomputed")
+        pd.DataFrame({"utterance_id": ids.to_numpy(), "norm": values}).to_csv(
+            cache_path, sep="\t", index=False
+        )
+        _fingerprint_path(cache_path).write_text(fingerprint)
+    print(f"  {cache_path.name}: recomputed ({len(df)} rows)")
     return pd.Series(values, index=df.index)
 
 
-def _attach_cached_wer(merged: pd.DataFrame, saved_wer: pd.DataFrame) -> pd.DataFrame:
-    """Left-merge the cached ``wer`` column, dropping rows whose fingerprint is stale.
+def _attach_cached_wer(
+    merged: pd.DataFrame, saved_wer: pd.DataFrame, cache_path: Path
+) -> pd.DataFrame:
+    """Left-merge the cached WER columns iff the WER file fingerprint is current.
 
-    Requires ``gold_norm``/``system_norm`` on ``merged`` to recompute the current
-    fingerprint. Files predating the fingerprint column are trusted as-is.
+    The fingerprint is computed over the cache's own utterance set (WER omits
+    empty-gold rows), so we restrict ``merged`` to those IDs before re-hashing
+    its ``gold_norm``/``system_norm``. A mismatch -- or a fingerprint-less legacy
+    file -- means the whole cache is stale and is simply not merged.
     """
-    has_fp = "fingerprint" in saved_wer.columns
-    cols = ["utterance_id", "wer", "edit_distance", "ref_length"] + (["fingerprint"] if has_fp else [])
-    merged = merged.merge(saved_wer[cols], on="utterance_id", how="left")
-    if has_fp:
-        current = wer_fingerprint(merged["gold_norm"], merged["system_norm"])
-        stale = merged["fingerprint"].notna() & (merged["fingerprint"] != current)
-        merged.loc[stale, "wer"] = pd.NA
-        merged = merged.drop(columns="fingerprint")
-    return merged
+    cached_ids = set(saved_wer["utterance_id"].astype(str))
+    subset = merged[merged["utterance_id"].astype(str).isin(cached_ids)]
+    current = wer_fingerprint(
+        subset["utterance_id"], subset["gold_norm"], subset["system_norm"]
+    )
+    if _read_fingerprint(cache_path) != current:
+        return merged
+    return merged.merge(
+        saved_wer[["utterance_id", "wer", "edit_distance", "ref_length"]],
+        on="utterance_id",
+        how="left",
+    )
 
 
 def load(
@@ -264,7 +313,9 @@ def load(
                 # it on the normalized path.
                 saved_wer = load_wer(corpus, model)
                 if saved_wer is not None:
-                    merged = _attach_cached_wer(merged, saved_wer)
+                    merged = _attach_cached_wer(
+                        merged, saved_wer, wer_path(corpus, model)
+                    )
             frames.append(merged)
 
     result = pd.concat(frames, ignore_index=True)
