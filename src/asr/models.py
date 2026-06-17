@@ -20,10 +20,13 @@ class Model(Protocol):
 
 
 class WhisperModel:
-    def __init__(self, size: str = "large", device: str = "cuda:0"):
+    def __init__(
+        self, size: str = "large", language: str | None = None, device: str = "cuda:0"
+    ):
         self.size = size
         self.device = device
-        self.name = f"whisper-{size}"
+        self.name = f"whisper-{size}-{language}"
+        self.language = language
         self._model = None  # loaded lazily so importing is cheap
 
     def _ensure_loaded(self):
@@ -35,7 +38,7 @@ class WhisperModel:
 
     def transcribe(self, audio_path: str | Path) -> str:
         model = self._ensure_loaded()
-        result = model.transcribe(str(audio_path))
+        result = model.transcribe(str(audio_path), language=self.language)
         return str(result["text"])
 
 
@@ -43,6 +46,9 @@ class WhisperModel:
 # ``device`` so the data-parallel transcriber can place a copy on each GPU.
 MODELS: dict[str, Callable[..., "Model"]] = {
     "whisper-large": lambda device="cuda:0": WhisperModel("large", device=device),
+    "whisper-large-en": lambda device="cuda:0": WhisperModel(
+        "large", language="en", device=device
+    ),
 }
 
 
