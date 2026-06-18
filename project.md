@@ -24,19 +24,22 @@ raw text stays canonical and revising rules just means reloading.
 Normalization runs the whisper normalizers per string and is the slow part of a
 load, so `load` caches it under `data/norm/` (`{corpus}__gold.tsv`,
 `{corpus}__{model}__system.tsv`) and `asr.evaluate` caches per-utterance WER
-under `data/wer/`. Both are **self-invalidating per row** — no manual busting:
+under `data/wer/`. Everything operates at the corpus (`corpus × model`) level, so
+each cache is validated as a **whole file** via a sidecar `.fp` fingerprint —
+match ⇒ reuse the file, mismatch ⇒ rebuild it. No manual busting:
 
-- **norm cache**: each row stores `fingerprint = hash(rule_signature + input)`,
-  where `rule_signature = hash(asr/normalize.py source + whisper version)`. A row
-  is reused only on an exact fingerprint match, so editing `normalize.py` or a
-  transcript recomputes exactly the affected rows. Pass `use_cache=False` to skip.
-- **WER cache**: WER is a pure function of `(gold_norm, system_norm)`, so each row
-  stores `fingerprint = hash(gold_norm + system_norm)`; `load` recomputes the
-  (now cached, cheap) normalizations and drops any WER row whose fingerprint no
-  longer matches. No rule signature needed — WER survives rule edits that don't
-  change the normalized text.
+- **norm cache**: `fp = hash(rule_signature + all inputs)`, where
+  `rule_signature = hash(asr/normalize.py source + whisper version)`. Editing
+  `normalize.py` or any transcript changes the fingerprint and recomputes the
+  file. Pass `use_cache=False` to skip the cache entirely.
+- **WER cache**: WER is a pure function of `(gold_norm, system_norm)`, so
+  `fp = hash` over the scored utterances' normalized pairs — no rule signature
+  needed. `load` recomputes the (now cached, cheap) normalizations and reuses the
+  WER file only if the fingerprint still matches, so WER survives rule edits that
+  don't change the normalized text.
 
-Caches are plain TSVs and safe to delete; they rebuild on the next load.
+Caches are plain TSVs (+ `.fp` sidecars) and safe to delete; they rebuild on the
+next load.
 
 ```sh
 python -m asr.corpora                                   # build chunks
@@ -145,3 +148,16 @@ also auxiliary speakers sometimes. What do we do about this?
 
 There is a trailing space behind `Ayrshire A/ISLAY-Y-ANON .trs` and the `.txt`
 file. I removed this.
+
+
+In LOCHEE-Y-ANON.trs, there is an utterance whose timestamp I think is
+mistranscribed:
+
+> "Here's an a- here's an add from- Here's an add from [name]." {BR}
+
+is noted as having start time 3723.976 and endtime 4857.699, but I think this
+is incorrect, listening back to the audio.
+
+
+coraal whisper-large-en: 15:30:00 on 2 L40s (480121 chunks)
+scosya whisper-large-en: 15:30:00 on 2 L40s (227491 chunks)
