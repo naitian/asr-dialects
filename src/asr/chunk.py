@@ -6,8 +6,8 @@ A :class:`TranscribedChunk` adds a single system's output for that utterance.
 
 Both are flat dataclasses so they round-trip cleanly to/from the TSV files under
 ``data/`` and land as real columns when loaded into a DataFrame for analysis.
-Corpus-specific fields that don't deserve a top-level column (e.g. SCOSYA
-region) go in ``extra``.
+Corpus-specific fields that don't deserve a top-level column (e.g. CORAAL
+socioeconomic/age group) go in ``extra``.
 """
 
 from dataclasses import dataclass, field
@@ -20,6 +20,7 @@ class Chunk:
     utterance_id: str  # unique within the corpus
     speaker: str
     line_no: str
+    region: str  # geographic region; shared across corpora
     # timing within the source recording
     start_time: float
     end_time: float

@@ -10,8 +10,8 @@ genuinely different:
     - ``parse_transcript()`` how to read its transcript format
     - ``transcript_suffix``  the transcript file extension
     - ``norm_profile``       its normalization guidelines (see ``asr.normalize``)
-    - optionally ``utterance_id()`` / ``chunk_extra()`` for id formats and
-      corpus-specific metadata.
+    - optionally ``utterance_id()`` / ``chunk_region()`` / ``chunk_extra()`` for
+      id formats, the shared ``region`` column, and corpus-specific metadata.
 
 Adding a new corpus is therefore a small subclass plus one ``CORPORA`` entry.
 """
@@ -65,6 +65,10 @@ class Corpus(ABC):
     def utterance_id(self, transcript_file: Path, line_no) -> str:
         return f"c-{transcript_file.stem}-{line_no}"
 
+    def chunk_region(self, audio_file: Path) -> str:
+        """Geographic region for every chunk from a file (shared column)."""
+        return ""
+
     def chunk_extra(self, audio_file: Path) -> dict:
         """Corpus-specific metadata to attach to every chunk from a file."""
         return {}
@@ -75,6 +79,7 @@ class Corpus(ABC):
     def _records_for_file(self, audio_file: Path, output_dir: Path) -> list[Chunk]:
         """Parse a transcript into chunk records (no audio extraction)."""
         transcript_file = self.transcript_path_for(audio_file)
+        region = self.chunk_region(audio_file)
         extra = self.chunk_extra(audio_file)
         chunks = []
         for start, end, meta in self.parse_transcript(transcript_file):
@@ -85,6 +90,7 @@ class Corpus(ABC):
                     utterance_id=utterance_id,
                     speaker=str(meta.get("speaker", "")),
                     line_no=str(meta["line_no"]),
+                    region=region,
                     start_time=start,
                     end_time=end,
                     gold_text=meta["text"] or "",
@@ -197,7 +203,22 @@ class CORAALCorpus(Corpus):
         return [p for p in self.path.glob("*.wav") if not p.name.startswith(".")]
 
     def utterance_id(self, transcript_file: Path, line_no) -> str:
-        return f"c-{transcript_file.stem.lower()}-{line_no}"
+        return f"c-{transcript_file.stem}-{line_no}"
+
+    def chunk_region(self, audio_file: Path) -> str:
+        # CORAAL filenames are `{region}_se{N}_ag{N}_{gender}_...`.
+        return audio_file.stem.split("_")[0]
+
+    def chunk_extra(self, audio_file: Path) -> dict:
+        # Speaker demographics live in the first four `_`-separated filename
+        # components: region (its own column), socioeconomic group, age group,
+        # gender.
+        _region, socioeconomic, age, gender = audio_file.stem.split("_")[:4]
+        return {
+            "socioeconomic_group": int(socioeconomic.removeprefix("se")),
+            "age_group": int(age.removeprefix("ag")),
+            "gender": gender,
+        }
 
     def parse_transcript(
         self, transcript_file: Path
@@ -247,8 +268,9 @@ class SCOSYACorpus(Corpus):
             if not p.name.startswith(".")
         ]
 
-    def chunk_extra(self, audio_file: Path) -> dict:
-        return {"region": audio_file.parent.name}
+    def chunk_region(self, audio_file: Path) -> str:
+        # Recordings are filed under a per-region directory.
+        return audio_file.parent.name
 
     def parse_transcript(
         self, transcript_file: Path
@@ -289,6 +311,6 @@ CORPORA: dict[str, type[Corpus]] = {
 
 
 if __name__ == "__main__":
-    corpus = SCOSYACorpus()
+    corpus = CORAALCorpus()
     chunks = corpus.create_chunks(num_procs=1)
     print(f"Created {len(chunks)} chunks for {corpus.name} corpus")

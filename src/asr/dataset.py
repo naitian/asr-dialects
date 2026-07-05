@@ -40,6 +40,7 @@ COLUMNS = [
     "utterance_id",
     "speaker",
     "line_no",
+    "region",
     "start_time",
     "end_time",
     "gold_text",
@@ -162,7 +163,11 @@ def load_transcriptions(corpus: str, model: str) -> pd.DataFrame:
             )
         path = legacy
 
-    df = pd.read_csv(path, sep="\t")
+    # keep_default_na=False so an empty transcription stays "" (a real, scorable
+    # empty output) and a clip transcribed as a NA-like token (e.g. "null") keeps
+    # its literal text. After the merge in ``load``, only a genuinely missing
+    # system row becomes NaN, which is what ``evaluate`` drops on.
+    df = pd.read_csv(path, sep="\t", keep_default_na=False)
     if "system_text" not in df.columns and "transcription" in df.columns:
         df = df.rename(columns={"transcription": "system_text"})
     df["model"] = model

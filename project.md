@@ -5,9 +5,9 @@ independently editable unit:
 
 | module             | responsibility |
 |--------------------|----------------|
-| `asr/chunk.py`     | `Chunk` / `TranscribedChunk` dataclasses (the on-disk/in-frame schema, incl. `corpus`, `speaker`, `line_no`, `extra`). |
+| `asr/chunk.py`     | `Chunk` / `TranscribedChunk` dataclasses (the on-disk/in-frame schema, incl. `corpus`, `speaker`, `line_no`, `region`, `extra`). |
 | `asr/normalize.py` | Normalization pipeline. `SHARED_LEXICON` + numeric tail apply to all; each corpus is a `NormProfile` (markup steps = gold-only, lexicon = both sides). `build(profile, strip_markup=...)`; `PROFILES` registry. |
-| `asr/corpora.py`   | `Corpus` ABC holding all chunking/audio logic; `CORAALCorpus`/`SCOSYACorpus` override only discovery + transcript parsing; `CORPORA` registry. |
+| `asr/corpora.py`   | `Corpus` ABC holding all chunking/audio logic; `CORAALCorpus`/`SCOSYACorpus` override only discovery, transcript parsing, and per-file metadata (`chunk_region` -> the shared `region` column; `chunk_extra` -> corpus-specific `extra`, e.g. CORAAL socioeconomic/age group/gender from the filename); `CORPORA` registry. |
 | `asr/models.py`    | `Model` protocol (`transcribe(path)->str`), `WhisperModel`, `MODELS` registry (factories keyed by name). |
 | `asr/dataset.py`   | `load(corpora, models)` -> tidy long-format DataFrame (one row per utterance x model) with `gold_norm`/`system_norm` applied per corpus, plus the cached per-utterance `wer` when `data/wer/{corpus}__{model}.tsv` exists. Normalization (the slow step) is cached to `data/norm/` and self-invalidates per row via fingerprints; see "Caching" below. The analysis entry point. |
 | `asr/transcribe.py`| CLI: run a model over a corpus's chunks (data parallel), output `data/transcriptions/{corpus}__{model}.tsv`. |
