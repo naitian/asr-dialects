@@ -42,12 +42,43 @@ class WhisperModel:
         return str(result["text"])
 
 
+class HFModel:
+    def __init__(self, model_path: str, device: str = "cuda:0"):
+        from transformers import pipeline
+
+        self.transcriber = pipeline(
+            "automatic-speech-recognition", model=model_path, device=device
+        )
+        self.name = model_path
+
+    def transcribe(self, audio_path: str | Path) -> str:
+        try:
+            return self.transcriber(str(audio_path))["text"]
+        except:
+            return ""
+
+
 # Registry of models available for evaluation. Each entry is a factory taking a
 # ``device`` so the data-parallel transcriber can place a copy on each GPU.
 MODELS: dict[str, Callable[..., "Model"]] = {
     "whisper-large": lambda device="cuda:0": WhisperModel("large", device=device),
     "whisper-large-en": lambda device="cuda:0": WhisperModel(
         "large", language="en", device=device
+    ),
+    "wav2vec": lambda device="cuda:0": HFModel(
+        "facebook/wav2vec2-large-960h", device=device
+    ),
+    "ibm-granite": lambda device="cuda:0": HFModel(
+        "ibm-granite/granite-speech-4.1-2b", device=device
+    ),
+    "nvidia-parakeet": lambda device="cuda:0": HFModel(
+        "nvidia/parakeet-tdt-0.6b-v2", device=device
+    ),
+    "nvidia-fastconformer": lambda device="cuda:0": HFModel(
+        "nvidia/stt_en_fastconformer_ctc_large", device=device
+    ),
+    "cohere-transcribe": lambda device="cuda:0": HFModel(
+        "CohereLabs/cohere-transcribe-03-2026", device=device
     ),
 }
 
