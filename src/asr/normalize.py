@@ -75,6 +75,12 @@ def regex_sub(pattern: str, replacement: str = "") -> Step:
     return lambda text: compiled.sub(replacement, text)
 
 
+def regex_filter(pattern: str) -> Step:
+    """A step that filters out any text matching the given regex."""
+    compiled = re.compile(pattern)
+    return lambda text: "" if compiled.search(text) else text
+
+
 def replace_lexicon(mapping: dict[str, str]) -> Step:
     """A step that applies each ``pattern -> replacement`` in order."""
     compiled = [(re.compile(pattern), repl) for pattern, repl in mapping.items()]
@@ -354,6 +360,17 @@ CORAAL = NormProfile(
 SCOSYA = NormProfile(
     name="scosya",
     markup_steps=[
+        # handle special markup rules
+        regex_sub(
+            r"\[!![^\]]+\]", ""
+        ),  # Anything with [!!…] should be removed as it’s a meta comment. The rest of the utterance should stay
+        regex_filter(
+            r"\[??[^\]]+\]"
+        ),  # [??…] is where the transcriber isn’t 100% sure of the utterance; we remove it entirely for now.... (TODO: revisit)
+        regex_filter(
+            r"\[[^\]]+\]"
+        ),  # Anything with [...] -  we should remove the entire utterance as this is where it’s bleeped
+        regex_filter(r"{BG}"),  # remove all utterances that contain a {BG} tag
         # remove words between brackets (including {})
         regex_sub(r"[<\[{][^>\]}]*[>\]}]"),
         # strip partial words (single trailing dash); keep whole words (double).
@@ -370,16 +387,19 @@ SCOSYA = NormProfile(
         r"\bna\b": "not",
         # scosya transcribes mhm as mmhm
         r"\bmmhm\b": "mhm",
-        # "occasionally 'gaa' has been heard for 'gonna'":
-        r"\bgaa\b": "gonna",
-        # NOTE: we normalize "nae" -> "not" for now (not fully principled; we
-        # do these but not e.g. "yince" -> "once", which is phonetically farther)
-        r"\bnae\b": "not",
-        r"\bnay\b": "no",
-        r"\bnay one\b": "no one",
-        r"\bnaybody\b": "nobody",
-        r"\bnaywaie\b": "nowhere",
-        r"\bnaything\b": "nothing",
+        # NOTE: removing these per conversation with SCOSYA team; we don't have a
+        # principled way to decide which dialect spellings to normalize, so we opt
+        # for a "light-touch" approach
+        # # "occasionally 'gaa' has been heard for 'gonna'":
+        # r"\bgaa\b": "gonna",
+        # # NOTE: we normalize "nae" -> "not" for now (not fully principled; we
+        # # do these but not e.g. "yince" -> "once", which is phonetically farther)
+        # r"\bnae\b": "not",
+        # r"\bnay\b": "no",
+        # r"\bnay one\b": "no one",
+        # r"\bnaybody\b": "nobody",
+        # r"\bnaywaie\b": "nowhere",
+        # r"\bnaything\b": "nothing",
     },
 )
 
@@ -387,6 +407,7 @@ SCOSYA = NormProfile(
 PROFILES: dict[str, NormProfile] = {
     CORAAL.name: CORAAL,
     SCOSYA.name: SCOSYA,
+    "scosya_sync": SCOSYA,  # sync version uses the same normalization
 }
 
 

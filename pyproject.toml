@@ -7,7 +7,7 @@ dependencies = [
     "torchaudio>=2.11.0",
     "torchcodec>=0.13.0",
     "tqdm>=4.67.3", "pandas>=3.0.3,<4", "trsproc>=2.1.0,<3",
-    "typer>=0.12", "levenshtein>=0.27.3,<0.28", "jupyter>=1.1.1,<2", "notebook>=7.5.7,<8", "matplotlib>=3.11.0,<4", "seaborn>=0.13.2,<0.14", "plotnine>=0.15.7,<0.16", "tabulate>=0.10.0,<0.11", "transformers>=5.12.1,<6",
+    "typer>=0.12", "levenshtein>=0.27.3,<0.28", "jupyter>=1.1.1,<2", "notebook>=7.5.7,<8", "matplotlib>=3.11.0,<4", "seaborn>=0.13.2,<0.14", "plotnine>=0.15.7,<0.16", "tabulate>=0.10.0,<0.11", "transformers>=5.12.1,<6", "datasets>=5.0.0,<6",
 ]
 name = "asr"
 requires-python = ">= 3.11"

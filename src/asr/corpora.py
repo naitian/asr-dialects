@@ -138,7 +138,9 @@ class Corpus(ABC):
                 )
         return chunks
 
-    def create_chunks(self, overwrite_existing: bool = False, num_procs: int = -1) -> list[Chunk]:
+    def create_chunks(
+        self, overwrite_existing: bool = False, num_procs: int = -1
+    ) -> list[Chunk]:
         output_dir = DATA_DIR / "chunks" / self.name
         output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -266,42 +268,59 @@ class SCOSYACorpus(Corpus):
             for region in self.regions
             for p in (self.path / region).glob("*.wav")
             if not p.name.startswith(".")
+            # see notes on PRESTWICK-Y-ANON split files
+            and p.name not in ("PRESTWICK-Y-ANON (1).wav", "PRESTWICK-Y-ANON (2).wav")
         ]
 
     def chunk_region(self, audio_file: Path) -> str:
         # Recordings are filed under a per-region directory.
         return audio_file.parent.name
 
+    def _parse(self, file_contents: str) -> Iterator[tuple[float, float, dict]]:
+        parser = ElementTree.XMLParser(encoding="ISO-8859-1")
+        tree = ElementTree.fromstring(file_contents, parser=parser)
+
+        line_counter = 0
+        for i, line in enumerate(tree.findall("Episode/Section/Turn")):
+            # this can consist of one chunk or multiple <Sync> segments;
+            # in the case of multiple segments, we want to split by each
+            # <Sync> and yield them separately.
+            syncs = line.findall("Sync")
+            if not syncs:
+                continue  # skip empty turns
+            start_times = [sync.get("time") for sync in syncs]
+            end_times = start_times[1:] + [line.get("endTime")]
+            for sync, start_time, end_time in zip(syncs, start_times, end_times):
+                # there is always at least one <Sync> in a Turn
+                text = sync.tail.strip() or ""
+                assert start_time is not None, f"Missing startTime for line: {text}"
+                assert end_time is not None, f"Missing endTime for line: {text}"
+                try:
+                    yield (
+                        float(start_time),
+                        float(end_time),
+                        {
+                            "line_no": line_counter,
+                            "speaker": line.get("speaker"),
+                            "text": text,
+                        },
+                    )
+                    line_counter += 1
+                except (TypeError, ValueError):
+                    raise ValueError(
+                        f"Invalid start or end time "
+                        f"{line.get('startTime')} -> {line.get('endTime')}"
+                    )
+
     def parse_transcript(
         self, transcript_file: Path
     ) -> Iterator[tuple[float, float, dict]]:
         # We implement our own TRS parser because the existing library takes too
         # long and does too much.
-        parser = ElementTree.XMLParser(encoding="ISO-8859-1")
         try:
-            tree = ElementTree.parse(transcript_file, parser=parser)
+            yield from self._parse(transcript_file.read_text(encoding="ISO-8859-1"))
         except Exception as err:
-            print(f"Error parsing {transcript_file}: {err}")
-            return
-
-        for i, line in enumerate(tree.findall("Episode/Section/Turn")):
-            try:
-                start_time = float(line.get("startTime"))  # type: ignore
-                end_time = float(line.get("endTime"))  # type: ignore
-            except (TypeError, ValueError):
-                raise ValueError(
-                    f"Invalid start or end time "
-                    f"{line.get('startTime')} -> {line.get('endTime')}"
-                )
-            # The utterance text sits in the tails after the <Sync> (and <Who>)
-            # markers inside the Turn, not in Turn.text. Collect all of it.
-            text = " ".join(line.itertext())
-            text = " ".join(text.split())  # collapse the TRS line breaks
-            yield (
-                start_time,
-                end_time,
-                {"line_no": i, "speaker": line.get("speaker"), "text": text},
-            )
+            raise ValueError(f"Error parsing {transcript_file}: {err}") from err
 
 
 CORPORA: dict[str, type[Corpus]] = {
@@ -311,6 +330,10 @@ CORPORA: dict[str, type[Corpus]] = {
 
 
 if __name__ == "__main__":
-    corpus = CORAALCorpus()
-    chunks = corpus.create_chunks(num_procs=1)
+    corpus = SCOSYACorpus()
+    corpus.name = "scosya_sync"
+    chunks = corpus.create_chunks(num_procs=8)
     print(f"Created {len(chunks)} chunks for {corpus.name} corpus")
+    # corpus = CORAALCorpus()
+    # chunks = corpus.create_chunks(num_procs=1)
+    # print(f"Created {len(chunks)} chunks for {corpus.name} corpus")

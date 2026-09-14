@@ -6,8 +6,9 @@ method. Implement that protocol and add one ``MODELS`` entry to make a new
 system available to the transcription/evaluation pipeline.
 """
 
+from datasets import Audio, Dataset
 from pathlib import Path
-from typing import Callable, Protocol, runtime_checkable
+from typing import Callable, Iterable, Protocol, Sequence, runtime_checkable
 
 
 @runtime_checkable
@@ -47,13 +48,16 @@ class HFModel:
         from transformers import pipeline
 
         self.transcriber = pipeline(
-            "automatic-speech-recognition", model=model_path, device=device
+            "automatic-speech-recognition",
+            model=model_path,
+            device=device,
         )
         self.name = model_path
 
     def transcribe(self, audio_path: str | Path) -> str:
         try:
-            return self.transcriber(str(audio_path))["text"]
+            output = self.transcriber(str(audio_path))
+            return str(output["text"])  # type: ignore
         except:
             return ""
 
@@ -72,7 +76,7 @@ MODELS: dict[str, Callable[..., "Model"]] = {
         "ibm-granite/granite-speech-4.1-2b", device=device
     ),
     "nvidia-parakeet": lambda device="cuda:0": HFModel(
-        "nvidia/parakeet-tdt-0.6b-v2", device=device
+        "nvidia/parakeet-tdt-0.6b-v3", device=device
     ),
     "nvidia-fastconformer": lambda device="cuda:0": HFModel(
         "nvidia/stt_en_fastconformer_ctc_large", device=device
